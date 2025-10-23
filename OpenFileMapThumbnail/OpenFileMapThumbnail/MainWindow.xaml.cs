@@ -24,5 +24,18 @@ namespace OpenFileMapThumbnail
         {
             InitializeComponent();
         }
+
+        private void OpenMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new FileOpenDialogo();
+            dialog.Owner = this; // make it modal
+
+            if (dialog.ShowDialog() == true)
+            {
+                string selectedFile = dialog.SelectedFile;
+                MessageBox.Show($"You selected: {selectedFile}");
+                // TODO: Load the file or process it here
+            }
+        }
     }
 }

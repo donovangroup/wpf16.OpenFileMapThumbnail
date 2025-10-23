@@ -1,0 +1,16 @@
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\bin\Debug\OpenFileMapThumbnail.exe.config
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\bin\Debug\OpenFileMapThumbnail.exe
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\bin\Debug\OpenFileMapThumbnail.pdb
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\FileOpenDialogo.baml
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\FileOpenDialogo.g.cs
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\MainWindow.g.cs
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\App.g.cs
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail_MarkupCompile.cache
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail_MarkupCompile.lref
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\MainWindow.baml
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail.g.resources
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail.Properties.Resources.resources
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail.csproj.GenerateResource.cache
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail.csproj.CoreCompileInputs.cache
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail.exe
+F:\github\wpf16.OpenFileMapThumbnail\OpenFileMapThumbnail\OpenFileMapThumbnail\obj\Debug\OpenFileMapThumbnail.pdb

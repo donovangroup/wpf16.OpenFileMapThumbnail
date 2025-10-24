@@ -27,7 +27,7 @@ namespace OpenFileMapThumbnail
 
         private void OpenMenuItem_Click(object sender, RoutedEventArgs e)
         {
-            var dialog = new FileOpenDialogo();
+            var dialog = new FileOpenDialogo(@"C:\Delex\BattleNet360\Server\Data\Exercises");
             dialog.Owner = this; // make it modal
 
             if (dialog.ShowDialog() == true)

@@ -111,7 +111,8 @@ namespace OpenFileMapThumbnail
                     {
                         if (!Inside(lon, lat, minLon, maxLon, minLat, maxLat)) continue;
                         var (x, y) = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, pixelWidth, pixelHeight);
-                        DrawBlueDot(dc, x, y, radius: 3.5);
+                     //   DrawBlueDiamond(dc, x, y, size: 9);
+                        DrawBlueDot(dc, x, y, radius: 3.0);
                     }
                 }
 
@@ -338,6 +339,25 @@ namespace OpenFileMapThumbnail
             sg.Freeze();
 
             var fill = new SolidColorBrush(Color.FromRgb(255, 215, 0)); // yellow/gold
+            fill.Freeze();
+
+            dc.DrawGeometry(fill, new Pen(Brushes.Black, 1.2), sg);
+        }
+
+        private static void DrawBlueDiamond(DrawingContext dc, double x, double y, double size)
+        {
+            var half = size / 2.0;
+            var sg = new StreamGeometry();
+            using (var ctx = sg.Open())
+            {
+                ctx.BeginFigure(new WpfPoint(x, y - half), isFilled: true, isClosed: true);
+                ctx.LineTo(new WpfPoint(x + half, y), isStroked: true, isSmoothJoin: false);
+                ctx.LineTo(new WpfPoint(x, y + half), isStroked: true, isSmoothJoin: false);
+                ctx.LineTo(new WpfPoint(x - half, y), isStroked: true, isSmoothJoin: false);
+            }
+            sg.Freeze();
+
+            var fill = new SolidColorBrush(Color.FromRgb(70, 160, 255)); // yellow/gold
             fill.Freeze();
 
             dc.DrawGeometry(fill, new Pen(Brushes.Black, 1.2), sg);

@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Windows;
+using System.Linq;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Xml.Linq;
@@ -20,7 +20,7 @@ namespace OpenFileMapThumbnail
         /// Render a land map from the shapefile.
         ///  - markers: white cross(es) (e.g., exercise center)
         ///  - launchMarkers: yellow diamond(s) (drawn last, on top)
-        ///  - otherPlatformMarkers: blue small dot(s) (drawn first)
+        ///  - otherPlatformMarkers: blue small dot(s) (drawn first; e.g., contacts)
         ///  - centerLon/centerLat + radiusNm: zoom window in nautical miles (1° ≈ 60 nm)
         ///  - padRatio: expands the deg window slightly to reduce hard coastline clipping
         ///  - crossOpacity: opacity of the white cross (0..1)
@@ -65,11 +65,11 @@ namespace OpenFileMapThumbnail
                 minLat = -85; maxLat = 85;
             }
 
-            var dv = new DrawingVisual();
+            var dv = new System.Windows.Media.DrawingVisual();
             using (var dc = dv.RenderOpen())
             {
                 // Background water
-                dc.DrawRectangle(water, null, new Rect(0, 0, pixelWidth, pixelHeight));
+                dc.DrawRectangle(water, null, new System.Windows.Rect(0, 0, pixelWidth, pixelHeight));
 
                 // Coastlines (land)
                 try
@@ -80,16 +80,19 @@ namespace OpenFileMapThumbnail
                         var geom = reader.Geometry;
                         if (geom == null) continue;
 
-                        if (geom is Polygon poly)
+                        if (geom is Polygon)
                         {
+                            var poly = (Polygon)geom;
                             DrawPolygonClipped(dc, poly, pixelWidth, pixelHeight, land, stroke,
                                                minLon, maxLon, minLat, maxLat);
                         }
-                        else if (geom is MultiPolygon mp)
+                        else if (geom is MultiPolygon)
                         {
+                            var mp = (MultiPolygon)geom;
                             for (int i = 0; i < mp.NumGeometries; i++)
                             {
-                                if (mp.GetGeometryN(i) is Polygon p)
+                                var p = mp.GetGeometryN(i) as Polygon;
+                                if (p != null)
                                 {
                                     DrawPolygonClipped(dc, p, pixelWidth, pixelHeight, land, stroke,
                                                        minLon, maxLon, minLat, maxLat);
@@ -107,34 +110,36 @@ namespace OpenFileMapThumbnail
                 // 1) Blue dots for other platforms (bottom-most markers)
                 if (otherPlatformMarkers != null)
                 {
-                    foreach (var (lon, lat) in otherPlatformMarkers)
+                    foreach (var ll in otherPlatformMarkers)
                     {
+                        double lon = ll.lon; double lat = ll.lat;
                         if (!Inside(lon, lat, minLon, maxLon, minLat, maxLat)) continue;
-                        var (x, y) = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, pixelWidth, pixelHeight);
-                     //   DrawBlueDiamond(dc, x, y, size: 9);
-                        DrawBlueDot(dc, x, y, radius: 3.0);
+                        var pt = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, pixelWidth, pixelHeight);
+                        DrawBlueDot(dc, pt.x, pt.y, 3.0);
                     }
                 }
 
                 // 2) White cross markers (e.g., exercise center)
                 if (markers != null)
                 {
-                    foreach (var (lon, lat) in markers)
+                    foreach (var ll in markers)
                     {
+                        double lon = ll.lon; double lat = ll.lat;
                         if (!Inside(lon, lat, minLon, maxLon, minLat, maxLat)) continue;
-                        var (x, y) = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, pixelWidth, pixelHeight);
-                        DrawWhiteCross(dc, x, y, size: 9, opacity: crossOpacity);
+                        var pt = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, pixelWidth, pixelHeight);
+                        DrawWhiteCross(dc, pt.x, pt.y, 9, crossOpacity);
                     }
                 }
 
                 // 3) Yellow diamonds for LaunchPlatform(s) (top-most markers)
                 if (launchMarkers != null)
                 {
-                    foreach (var (lon, lat) in launchMarkers)
+                    foreach (var ll in launchMarkers)
                     {
+                        double lon = ll.lon; double lat = ll.lat;
                         if (!Inside(lon, lat, minLon, maxLon, minLat, maxLat)) continue;
-                        var (x, y) = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, pixelWidth, pixelHeight);
-                        DrawDiamond(dc, x, y, size: 9);
+                        var pt = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, pixelWidth, pixelHeight);
+                        DrawDiamond(dc, pt.x, pt.y, 9);
                     }
                 }
             }
@@ -145,7 +150,171 @@ namespace OpenFileMapThumbnail
             return rtb;
         }
 
-        // ---------------------- Auto-fit helpers (for hover zoom) ----------------------
+        // ------------------------------------------------------------------------------------
+        //  Adaptive contacts-first zoom that guarantees launches stay in frame if needed
+        // ------------------------------------------------------------------------------------
+
+        /// <summary>
+        /// Renders a hover map centered primarily on CONTACTS. If any launch is out of frame,
+        /// we adapt the center/radius toward the overall auto-fit so yellow diamonds remain visible.
+        /// </summary>
+        public static ImageSource RenderContactsZoomFromExercise(
+            string shpPath,
+            string exercisePath,
+            int pixelWidth,
+            int pixelHeight,
+            double minContactsRadiusNm = 8,     // tight min for close clusters
+            double paddingNm = 8,               // padding around cluster
+            double maxContactsRadiusNm = 120,   // typical “close cluster” cap
+            double padRatio = 1.10,             // coast smoothing
+            double crossOpacity = 0.9)
+        {
+            var launch = TryReadLaunchPlatformPositions(exercisePath);
+            var contacts = TryReadOtherPlatformPositions(exercisePath);
+
+            // White cross @ exercise center if present
+            var centerMarkers = new List<(double lon, double lat)>();
+            double cLon, cLat;
+            if (TryReadExerciseCenter(exercisePath, out cLon, out cLat))
+                centerMarkers.Add((cLon, cLat));
+
+            // If no platforms at all, world-ish view
+            bool anyLaunch = launch != null && launch.Count > 0;
+            bool anyContacts = contacts != null && contacts.Count > 0;
+            if (!anyLaunch && !anyContacts)
+            {
+                return RenderWorldMap(
+                    shpPath, pixelWidth, pixelHeight,
+                    markers: centerMarkers,
+                    launchMarkers: null,
+                    otherPlatformMarkers: null,
+                    centerLon: 0, centerLat: 0,
+                    radiusNm: 1200, padRatio: padRatio, crossOpacity: crossOpacity);
+            }
+
+            // Compute an adaptive view:
+            //   1) tight contacts view (if any contacts)
+            //   2) overall auto-fit over ALL platforms
+            //   3) if launches would be outside tight view, blend toward auto-fit
+            double finalLon, finalLat, finalRadius;
+
+            if (anyContacts)
+            {
+                var tight = ComputeTightClusterView(contacts, minContactsRadiusNm, paddingNm, maxContactsRadiusNm);
+                var autoAll = ComputeAutoView(launch, contacts, 60, 30);
+
+                // Compute max distance from tight center to ANY point (launch or contact)
+                double maxFromTight = 0;
+                if (contacts != null)
+                {
+                    for (int i = 0; i < contacts.Count; i++)
+                    {
+                        double d = HaversineNm(tight.centerLat, tight.centerLon, contacts[i].lat, contacts[i].lon);
+                        if (d > maxFromTight) maxFromTight = d;
+                    }
+                }
+                if (launch != null)
+                {
+                    for (int i = 0; i < launch.Count; i++)
+                    {
+                        double d = HaversineNm(tight.centerLat, tight.centerLon, launch[i].lat, launch[i].lon);
+                        if (d > maxFromTight) maxFromTight = d;
+                    }
+                }
+
+                double neededRadius = maxFromTight + paddingNm;
+
+                // If needed to include launches/contacts exceeds tight radius by a margin, widen the view.
+                // Also, when widening, move center to the overall auto-fit center for better balance.
+                if (neededRadius > tight.radiusNm * 1.05)
+                {
+                    // Cap the radius so we don't zoom out excessively on hover,
+                    // but never exceed the overall auto-fit (which always fits all points).
+                    double widened = Math.Max(neededRadius, minContactsRadiusNm);
+                    widened = Math.Min(widened, Math.Max(maxContactsRadiusNm, autoAll.radiusNm));
+                    widened = Math.Min(widened, autoAll.radiusNm);
+
+                    finalLon = autoAll.centerLon;
+                    finalLat = autoAll.centerLat;
+                    finalRadius = widened;
+                }
+                else
+                {
+                    // Tight view already includes launches ⇒ keep it tight
+                    finalLon = tight.centerLon;
+                    finalLat = tight.centerLat;
+                    finalRadius = tight.radiusNm;
+                }
+            }
+            else
+            {
+                // no contacts, only launches
+                var auto = ComputeAutoView(launch, null, 60, 30);
+                finalLon = auto.centerLon;
+                finalLat = auto.centerLat;
+                finalRadius = auto.radiusNm;
+            }
+
+            return RenderWorldMap(
+                shpPath,
+                pixelWidth,
+                pixelHeight,
+                markers: centerMarkers,
+                launchMarkers: launch,
+                otherPlatformMarkers: contacts,
+                centerLon: finalLon,
+                centerLat: finalLat,
+                radiusNm: finalRadius,
+                padRatio: padRatio,
+                crossOpacity: crossOpacity
+            );
+        }
+
+        /// <summary>
+        /// Tight cluster fit for a set of points:
+        ///   center = centroid (average lon/lat via xyz),
+        ///   radius = max distance from centroid + padding, clamped to [min,max].
+        /// </summary>
+        public static (double centerLon, double centerLat, double radiusNm) ComputeTightClusterView(
+            IList<(double lon, double lat)> points,
+            double minRadiusNm,
+            double paddingNm,
+            double maxRadiusNm)
+        {
+            if (points == null || points.Count == 0)
+                return (0, 0, Math.Max(minRadiusNm, 60));
+
+            if (points.Count == 1)
+                return (points[0].lon, points[0].lat, minRadiusNm);
+
+            double cx = 0, cy = 0, cz = 0;
+            for (int i = 0; i < points.Count; i++)
+            {
+                double phi = ToRad(points[i].lat);
+                double lam = ToRad(points[i].lon);
+                cx += Math.Cos(phi) * Math.Cos(lam);
+                cy += Math.Cos(phi) * Math.Sin(lam);
+                cz += Math.Sin(phi);
+            }
+            cx /= points.Count; cy /= points.Count; cz /= points.Count;
+            double hyp = Math.Sqrt(cx * cx + cy * cy);
+            double centerLat = ToDeg(Math.Atan2(cz, hyp));
+            double centerLon = ToDeg(Math.Atan2(cy, cx));
+
+            double radius = 0;
+            for (int i = 0; i < points.Count; i++)
+            {
+                double d = HaversineNm(centerLat, centerLon, points[i].lat, points[i].lon);
+                if (d > radius) radius = d;
+            }
+            radius += paddingNm;
+            if (radius < minRadiusNm) radius = minRadiusNm;
+            if (radius > maxRadiusNm) radius = maxRadiusNm;
+
+            return (centerLon, centerLat, radius);
+        }
+
+        // ---------------------- Auto-fit helpers ----------------------
 
         /// <summary>
         /// Compute a view (center lon/lat and radius in NM) that fits all provided platform markers.
@@ -162,19 +331,14 @@ namespace OpenFileMapThumbnail
             if (otherPlatformMarkers != null) pts.AddRange(otherPlatformMarkers);
 
             if (pts.Count == 0)
-            {
-                // Fallback: world-ish view
                 return (0, 0, Math.Max(minRadiusNm, 600));
-            }
 
-            // If only one point, center there with min radius
             if (pts.Count == 1)
             {
-                var (lon, lat) = pts[0];
-                return (lon, lat, minRadiusNm);
+                var one = pts[0];
+                return (one.lon, one.lat, minRadiusNm);
             }
 
-            // Find farthest pair by great-circle distance
             double maxNm = 0;
             int iMax = 0, jMax = 1;
             for (int i = 0; i < pts.Count; i++)
@@ -190,25 +354,19 @@ namespace OpenFileMapThumbnail
                 }
             }
 
-            // Center at geographic midpoint of farthest pair (good enough for local extents)
             var mid = GeographicMidpoint(pts[iMax].lat, pts[iMax].lon, pts[jMax].lat, pts[jMax].lon);
 
-            // Radius: at least half of farthest distance, plus padding; clamp to minRadius
             double radius = Math.Max(minRadiusNm, (maxNm / 2.0) + paddingNm);
 
-            // Make sure ALL points fit (if outliers make it larger)
-            foreach (var p in pts)
+            for (int i = 0; i < pts.Count; i++)
             {
-                double d = HaversineNm(mid.lat, mid.lon, p.lat, p.lon);
+                double d = HaversineNm(mid.lat, mid.lon, pts[i].lat, pts[i].lon);
                 if (d + paddingNm > radius) radius = d + paddingNm;
             }
 
             return (mid.lon, mid.lat, radius);
         }
 
-        /// <summary>
-        /// Convenience: parses the exercise file to get launch + other platforms and returns an auto-fit view.
-        /// </summary>
         public static (double centerLon, double centerLat, double radiusNm) ComputeAutoViewFromExercise(
             string exercisePath,
             double minRadiusNm = 60,
@@ -222,7 +380,7 @@ namespace OpenFileMapThumbnail
         // Great-circle distance in nautical miles
         private static double HaversineNm(double lat1, double lon1, double lat2, double lon2)
         {
-            const double R_km = 6371.0088;   // mean Earth radius
+            const double R_km = 6371.0088;
             const double KM_PER_NM = 1.852;
 
             double dLat = ToRad(lat2 - lat1);
@@ -235,19 +393,18 @@ namespace OpenFileMapThumbnail
             return km / KM_PER_NM;
         }
 
-        // Geographic midpoint between two points
         private static (double lat, double lon) GeographicMidpoint(double lat1, double lon1, double lat2, double lon2)
         {
-            double φ1 = ToRad(lat1), λ1 = ToRad(lon1);
-            double φ2 = ToRad(lat2), λ2 = ToRad(lon2);
+            double p1 = ToRad(lat1), l1 = ToRad(lon1);
+            double p2 = ToRad(lat2), l2 = ToRad(lon2);
 
-            double x1 = Math.Cos(φ1) * Math.Cos(λ1);
-            double y1 = Math.Cos(φ1) * Math.Sin(λ1);
-            double z1 = Math.Sin(φ1);
+            double x1 = Math.Cos(p1) * Math.Cos(l1);
+            double y1 = Math.Cos(p1) * Math.Sin(l1);
+            double z1 = Math.Sin(p1);
 
-            double x2 = Math.Cos(φ2) * Math.Cos(λ2);
-            double y2 = Math.Cos(φ2) * Math.Sin(λ2);
-            double z2 = Math.Sin(φ2);
+            double x2 = Math.Cos(p2) * Math.Cos(l2);
+            double y2 = Math.Cos(p2) * Math.Sin(l2);
+            double z2 = Math.Sin(p2);
 
             double x = (x1 + x2) / 2.0;
             double y = (y1 + y2) / 2.0;
@@ -263,7 +420,7 @@ namespace OpenFileMapThumbnail
         private static double ToRad(double deg) => deg * Math.PI / 180.0;
         private static double ToDeg(double rad) => rad * 180.0 / Math.PI;
 
-        // ---------------- Polygon drawing (clamped so coasts remain continuous) ----------------
+        // ---------------- Polygon drawing ----------------
 
         private static void DrawPolygonClipped(DrawingContext dc, Polygon poly, int w, int h,
                                                Brush fill, Brush stroke,
@@ -292,27 +449,26 @@ namespace OpenFileMapThumbnail
                 double lon = Clamp(c.X, minLon, maxLon);
                 double lat = Clamp(c.Y, minLat, maxLat);
 
-                var (x, y) = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, w, h);
-                var pt = new WpfPoint(x, y);
+                var pt = LonLatToCanvas(lon, lat, minLon, maxLon, minLat, maxLat, w, h);
+                var wpf = new WpfPoint(pt.x, pt.y);
 
                 if (!started)
                 {
-                    ctx.BeginFigure(pt, isFilled: true, isClosed: true);
+                    ctx.BeginFigure(wpf, isFilled: true, isClosed: true);
                     started = true;
                 }
                 else
                 {
-                    ctx.LineTo(pt, isStroked: false, isSmoothJoin: false);
+                    ctx.LineTo(wpf, isStroked: false, isSmoothJoin: false);
                 }
             }
         }
 
-        // -------------------------------- Marker drawings --------------------------------
+        // ---------------- Marker drawings ----------------
 
         private static void DrawWhiteCross(DrawingContext dc, double x, double y, double size, double opacity = 0.85)
         {
             double half = size / 2.0;
-
             var brush = new SolidColorBrush(Color.FromArgb(
                 (byte)Math.Max(0, Math.Min(255, opacity * 255.0)),
                 255, 255, 255));
@@ -327,7 +483,7 @@ namespace OpenFileMapThumbnail
 
         private static void DrawDiamond(DrawingContext dc, double x, double y, double size)
         {
-            var half = size / 2.0;
+            double half = size / 2.0;
             var sg = new StreamGeometry();
             using (var ctx = sg.Open())
             {
@@ -344,25 +500,6 @@ namespace OpenFileMapThumbnail
             dc.DrawGeometry(fill, new Pen(Brushes.Black, 1.2), sg);
         }
 
-        private static void DrawBlueDiamond(DrawingContext dc, double x, double y, double size)
-        {
-            var half = size / 2.0;
-            var sg = new StreamGeometry();
-            using (var ctx = sg.Open())
-            {
-                ctx.BeginFigure(new WpfPoint(x, y - half), isFilled: true, isClosed: true);
-                ctx.LineTo(new WpfPoint(x + half, y), isStroked: true, isSmoothJoin: false);
-                ctx.LineTo(new WpfPoint(x, y + half), isStroked: true, isSmoothJoin: false);
-                ctx.LineTo(new WpfPoint(x - half, y), isStroked: true, isSmoothJoin: false);
-            }
-            sg.Freeze();
-
-            var fill = new SolidColorBrush(Color.FromRgb(70, 160, 255)); // yellow/gold
-            fill.Freeze();
-
-            dc.DrawGeometry(fill, new Pen(Brushes.Black, 1.2), sg);
-        }
-
         private static void DrawBlueDot(DrawingContext dc, double x, double y, double radius)
         {
             var fill = new SolidColorBrush(Color.FromRgb(70, 160, 255)); // bright-ish blue
@@ -370,14 +507,13 @@ namespace OpenFileMapThumbnail
             dc.DrawEllipse(fill, new Pen(Brushes.White, 1.0), new WpfPoint(x, y), radius, radius);
         }
 
-        // -------------------------------- Utilities --------------------------------
+        // ---------------- Utilities ----------------
 
         private static (double x, double y) LonLatToCanvas(double lon, double lat,
                                                            double minLon, double maxLon,
                                                            double minLat, double maxLat,
                                                            int w, int h)
         {
-            // Equirectangular (plate carrée) mapping for thumbnails
             double x = (lon - minLon) / (maxLon - minLon) * w;
             double y = (1 - (lat - minLat) / (maxLat - minLat)) * h;
             return (x, y);
@@ -394,15 +530,15 @@ namespace OpenFileMapThumbnail
 
         private static ImageSource CreatePlaceholder(int w, int h, string message)
         {
-            var dv = new DrawingVisual();
+            var dv = new System.Windows.Media.DrawingVisual();
             using (var dc = dv.RenderOpen())
             {
-                dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(25, 27, 34)), null, new Rect(0, 0, w, h));
-                var ft = new FormattedText(
+                dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(25, 27, 34)), null, new System.Windows.Rect(0, 0, w, h));
+                var ft = new System.Windows.Media.FormattedText(
                     message,
                     CultureInfo.InvariantCulture,
-                    FlowDirection.LeftToRight,
-                    new Typeface("Segoe UI"),
+                    System.Windows.FlowDirection.LeftToRight,
+                    new System.Windows.Media.Typeface("Segoe UI"),
                     12,
                     Brushes.LightGray,
                     1.25);
@@ -414,9 +550,8 @@ namespace OpenFileMapThumbnail
             return rtb;
         }
 
-        // ---------------------------- ECEF <-> Lat/Lon & Parsing ----------------------------
+        // ---------------- ECEF <-> Lat/Lon & Parsing ----------------
 
-        /// <summary>Reads &lt;Properties&gt;/&lt;CenterPosition&gt; ECEF and converts to lon/lat.</summary>
         public static bool TryReadExerciseCenter(string xmlPath, out double lonDeg, out double latDeg)
         {
             lonDeg = latDeg = 0;
@@ -426,7 +561,9 @@ namespace OpenFileMapThumbnail
                 double x = Extract(xml, "<X>", "</X>", 1);
                 double y = Extract(xml, "<Y>", "</Y>", 1);
                 double z = Extract(xml, "<Z>", "</Z>", 1);
-                EcefToGeodeticWgs84(x, y, z, out latDeg, out lonDeg);
+                double latD, lonD;
+                EcefToGeodeticWgs84(x, y, z, out latD, out lonD);
+                latDeg = latD; lonDeg = lonD;
                 return true;
             }
             catch
@@ -435,7 +572,6 @@ namespace OpenFileMapThumbnail
             }
         }
 
-        /// <summary>All platforms with Role == LaunchPlatform, converted to lon/lat.</summary>
         public static List<(double lon, double lat)> TryReadLaunchPlatformPositions(string exercisePath)
         {
             var list = new List<(double lon, double lat)>();
@@ -448,9 +584,11 @@ namespace OpenFileMapThumbnail
                     if (!string.Equals(role, "LaunchPlatform", StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    if (TryGetPositionECEF(p, out var x, out var y, out var z))
+                    double x, y, z;
+                    if (TryGetPositionECEF(p, out x, out y, out z))
                     {
-                        EcefToGeodeticWgs84(x, y, z, out var lat, out var lon);
+                        double lat, lon;
+                        EcefToGeodeticWgs84(x, y, z, out lat, out lon);
                         list.Add((lon, lat));
                     }
                 }
@@ -459,7 +597,6 @@ namespace OpenFileMapThumbnail
             return list;
         }
 
-        /// <summary>All platforms that have a Position and Role != LaunchPlatform, converted to lon/lat.</summary>
         public static List<(double lon, double lat)> TryReadOtherPlatformPositions(string exercisePath)
         {
             var list = new List<(double lon, double lat)>();
@@ -472,9 +609,11 @@ namespace OpenFileMapThumbnail
                     if (string.Equals(role, "LaunchPlatform", StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    if (TryGetPositionECEF(p, out var x, out var y, out var z))
+                    double x, y, z;
+                    if (TryGetPositionECEF(p, out x, out y, out z))
                     {
-                        EcefToGeodeticWgs84(x, y, z, out var lat, out var lon);
+                        double lat, lon;
+                        EcefToGeodeticWgs84(x, y, z, out lat, out lon);
                         list.Add((lon, lat));
                     }
                 }
@@ -489,17 +628,18 @@ namespace OpenFileMapThumbnail
             var pos = platform.Element("Position");
             if (pos == null) return false;
 
-            bool okX = double.TryParse(pos.Element("X")?.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out x);
-            bool okY = double.TryParse(pos.Element("Y")?.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out y);
-            bool okZ = double.TryParse(pos.Element("Z")?.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out z);
+            double xx, yy, zz;
+            bool okX = double.TryParse(pos.Element("X") != null ? pos.Element("X").Value : null, NumberStyles.Float, CultureInfo.InvariantCulture, out xx);
+            bool okY = double.TryParse(pos.Element("Y") != null ? pos.Element("Y").Value : null, NumberStyles.Float, CultureInfo.InvariantCulture, out yy);
+            bool okZ = double.TryParse(pos.Element("Z") != null ? pos.Element("Z").Value : null, NumberStyles.Float, CultureInfo.InvariantCulture, out zz);
+            x = xx; y = yy; z = zz;
             return okX && okY && okZ;
         }
 
-        /// <summary>ECEF (meters, WGS-84) → geodetic lat/lon in degrees.</summary>
         public static void EcefToGeodeticWgs84(double x, double y, double z, out double latDeg, out double lonDeg)
         {
-            const double a = 6378137.0;            // semi-major axis
-            const double e2 = 6.69437999014e-3;     // first eccentricity^2
+            const double a = 6378137.0;
+            const double e2 = 6.69437999014e-3;
 
             double lon = Math.Atan2(y, x);
             double p = Math.Sqrt(x * x + y * y);

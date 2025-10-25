@@ -34,7 +34,6 @@ namespace OpenFileMapThumbnail
         private const double PadRatio = 1.15;    // buffer to reduce coastline clipping
         private const double CrossOpacity = 0.85;
 
-        // Simple per-tile state
         private sealed class TileState
         {
             public string Path { get; set; }
@@ -43,9 +42,7 @@ namespace OpenFileMapThumbnail
             public ImageSource DefaultPreview { get; set; }
             public ImageSource HoverPreview { get; set; }
             public bool HoverRenderStarted { get; set; }
-
-            // NEW: if true, skip all hover swaps (used when no platforms)
-            public bool DisableHover { get; set; }
+            public bool DisableHover { get; set; } // set true for tiles with no platforms
         }
 
         public FileOpenDialogo(string initialFolder = null)
@@ -63,7 +60,6 @@ namespace OpenFileMapThumbnail
 
         private void LoadTiles(string folder)
         {
-            // cancel any in-flight work
             if (_cts != null) _cts.Cancel();
             _cts = new CancellationTokenSource();
 
@@ -77,7 +73,6 @@ namespace OpenFileMapThumbnail
 
             try
             {
-                // Collect entries (folders first, then files we care about)
                 var entries = new List<(string path, bool isFolder)>();
 
                 foreach (var dir in SafeGetDirectories(folder))
@@ -92,17 +87,13 @@ namespace OpenFileMapThumbnail
 
                 CountText.Text = string.Format("{0} items", entries.Count);
 
-                // Create placeholders immediately; render each tile preview in the background
                 foreach (var item in entries)
                 {
                     var tuple = CreatePlaceholderTile(item.path, item.isFolder);
-                    var border = tuple.border;
-                    var state = tuple.state;
-
-                    TilePanel.Children.Add(border);
+                    TilePanel.Children.Add(tuple.border);
 
                     // fire-and-forget background render per tile
-                    var _ = RenderTileAsync(state, _cts.Token);
+                    var _ = RenderTileAsync(tuple.state, _cts.Token);
                 }
             }
             catch (Exception ex)
@@ -128,7 +119,7 @@ namespace OpenFileMapThumbnail
         {
             var grid = new Grid { Width = TileWidth, Height = TileHeight, Margin = new Thickness(8) };
 
-            // Fast solid placeholder (so dialog appears instantly)
+            // Fast solid placeholder
             var phDv = new DrawingVisual();
             using (var dc = phDv.RenderOpen())
             {
@@ -143,7 +134,7 @@ namespace OpenFileMapThumbnail
                 Source = phBmp,
                 Stretch = Stretch.UniformToFill,
                 ClipToBounds = true,
-                Opacity = 0.85 // makes the fade-in a touch more noticeable
+                Opacity = 0.85
             };
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
             grid.Children.Add(img);
@@ -168,7 +159,6 @@ namespace OpenFileMapThumbnail
                 Cursor = System.Windows.Input.Cursors.Hand
             };
 
-            // Tile state cache
             var state = new TileState
             {
                 Path = path,
@@ -226,7 +216,6 @@ namespace OpenFileMapThumbnail
                             var launchMarkers = MapTileRenderer.TryReadLaunchPlatformPositions(state.Path);
                             var otherMarkers = MapTileRenderer.TryReadOtherPlatformPositions(state.Path);
 
-                            // Render zoomed-in map with slight padding to keep coasts smooth
                             result = MapTileRenderer.RenderWorldMap(
                                 _gshhsPath,
                                 pixelWidth: TileWidth,
@@ -240,6 +229,11 @@ namespace OpenFileMapThumbnail
                                 padRatio: PadRatio,
                                 crossOpacity: CrossOpacity
                             );
+
+                            // record whether this tile has any platforms (to skip hover on empties)
+                            state.DisableHover =
+                                (launchMarkers == null || launchMarkers.Count == 0) &&
+                                (otherMarkers == null || otherMarkers.Count == 0);
                         }
                         else if (_imageExts.Contains(ext))
                         {
@@ -247,14 +241,12 @@ namespace OpenFileMapThumbnail
                         }
                         else
                         {
-                            // Unhandled file type → keep placeholder
                             return;
                         }
                     }
 
                     if (ct.IsCancellationRequested) return;
 
-                    // Swap into UI and cache default
                     await Dispatcher.InvokeAsync(new Action(() =>
                     {
                         if (ct.IsCancellationRequested) return;
@@ -271,7 +263,7 @@ namespace OpenFileMapThumbnail
             }
             catch (OperationCanceledException)
             {
-                // Navigated to another folder; ignore
+                // ignore
             }
             catch (Exception ex)
             {
@@ -324,28 +316,26 @@ namespace OpenFileMapThumbnail
         }
 
         // -----------------------
-        // Hover zoom (UI)
+        // Hover zoom (adaptive: contacts-first but guarantees launches visible)
         // -----------------------
 
         private async void Border_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
         {
             Border b;
-            if (!(sender is Border))
-                return;
+            if (!(sender is Border)) return;
             b = (Border)sender;
 
             TileState st;
-            if (!(b.Tag is TileState))
-                return;
+            if (!(b.Tag is TileState)) return;
             st = (TileState)b.Tag;
 
             if (st.IsFolder) return;
-            if (st.DisableHover) return; // <- skip hover behavior for no-platform tiles
+            if (st.DisableHover) return;
 
             string ext = System.IO.Path.GetExtension(st.Path).ToLowerInvariant();
             if (ext != ".exercise") return;
 
-            // If we don't have a hover preview yet, render it in the background (only once)
+            // Render hover preview once (per tile)
             if (!st.HoverRenderStarted && st.HoverPreview == null)
             {
                 st.HoverRenderStarted = true;
@@ -355,44 +345,30 @@ namespace OpenFileMapThumbnail
                     await _thumbWorkers.WaitAsync(_cts.Token);
                     try
                     {
-                        // Gather platform markers first
+                        // Quick check: no platforms → disable hover (avoid flicker)
                         var launch = MapTileRenderer.TryReadLaunchPlatformPositions(st.Path);
                         var other = MapTileRenderer.TryReadOtherPlatformPositions(st.Path);
-
-                        // If there are no platforms at all, disable hover and bail
-                        bool noPlatforms =
-                            (launch == null || launch.Count == 0) &&
-                            (other == null || other.Count == 0);
-
+                        bool noPlatforms = (launch == null || launch.Count == 0) && (other == null || other.Count == 0);
                         if (noPlatforms)
                         {
-                            st.DisableHover = true;   // future hovers do nothing
-                            st.HoverPreview = null;   // ensure no swap attempt
+                            st.DisableHover = true;
+                            st.HoverPreview = null;
                             return;
                         }
 
-                        // Compute auto-fit view over ALL platforms
-                        var auto = MapTileRenderer.ComputeAutoView(launch, other, 60, 30);
-
-                        // Build markers
-                        var centerMarkers = new List<(double lon, double lat)>();
-                        double cLon, cLat;
-                        if (MapTileRenderer.TryReadExerciseCenter(st.Path, out cLon, out cLat))
-                            centerMarkers.Add((cLon, cLat));
-
-                        var hoverImg = MapTileRenderer.RenderWorldMap(
+                        // Adaptive contacts-first zoom with guarantee launches are in frame
+                        var hoverImg = MapTileRenderer.RenderContactsZoomFromExercise(
                             _gshhsPath,
-                            TileWidth, TileHeight,
-                            markers: centerMarkers,
-                            launchMarkers: launch,
-                            otherPlatformMarkers: other,
-                            centerLon: auto.centerLon,
-                            centerLat: auto.centerLat,
-                            radiusNm: auto.radiusNm,
+                            st.Path,
+                            pixelWidth: TileWidth,
+                            pixelHeight: TileHeight,
+                            minContactsRadiusNm: 6,    // tight for close clusters
+                            paddingNm: 8,
+                            maxContactsRadiusNm: 140,  // allow more room for mid-spread sets
                             padRatio: 1.10,
                             crossOpacity: 0.9);
 
-                        st.HoverPreview = hoverImg; // Frozen inside renderer
+                        st.HoverPreview = hoverImg;
                     }
                     finally
                     {
@@ -410,7 +386,6 @@ namespace OpenFileMapThumbnail
                 }
             }
 
-            // If hover image is available and it's different, swap it in with a fade
             if (st.HoverPreview != null && !SameSource(st.ImageControl, st.HoverPreview))
             {
                 st.ImageControl.Source = st.HoverPreview;
@@ -421,13 +396,11 @@ namespace OpenFileMapThumbnail
         private void Border_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
         {
             Border b;
-            if (!(sender is Border))
-                return;
+            if (!(sender is Border)) return;
             b = (Border)sender;
 
             TileState st;
-            if (!(b.Tag is TileState))
-                return;
+            if (!(b.Tag is TileState)) return;
             st = (TileState)b.Tag;
 
             if (st.DefaultPreview != null && !SameSource(st.ImageControl, st.DefaultPreview))
@@ -440,13 +413,11 @@ namespace OpenFileMapThumbnail
         private void Border_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             Border b;
-            if (!(sender is Border))
-                return;
+            if (!(sender is Border)) return;
             b = (Border)sender;
 
             TileState st;
-            if (!(b.Tag is TileState))
-                return;
+            if (!(b.Tag is TileState)) return;
             st = (TileState)b.Tag;
 
             if (Directory.Exists(st.Path))
@@ -526,9 +497,7 @@ namespace OpenFileMapThumbnail
 
         private static bool SameSource(Image img, ImageSource src)
         {
-            // Reference equality is sufficient; RenderWorldMap returns frozen bitmaps.
             return object.ReferenceEquals(img.Source, src);
         }
     }
 }
- 
